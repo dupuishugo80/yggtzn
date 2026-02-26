@@ -1,0 +1,250 @@
+import glob
+import json
+import logging
+import os
+import re
+import threading
+from pathlib import Path
+from seleniumbase import SB
+from seleniumbase.core.download_helper import get_downloads_folder
+from config import YGG_USERNAME, YGG_PASSWORD, YGG_BASE_URL, HEADLESS, MAX_SEARCH_PAGES
+
+log = logging.getLogger(__name__)
+
+COOKIES_PATH = Path(__file__).parent / "cookies.json"
+
+
+class YGGBrowser:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.sb = None
+            cls._instance.logged_in = False
+            cls._instance._sb_context = None
+            cls._instance._lock = threading.Lock()
+        return cls._instance
+
+    def _start_browser(self):
+        if self.sb:
+            return
+        self._download_dir = get_downloads_folder()
+        os.makedirs(self._download_dir, exist_ok=True)
+        log.info("Starting SeleniumBase UC browser (downloads → %s)…", self._download_dir)
+        self._sb_context = SB(uc=True, headed=not HEADLESS, headless2=HEADLESS)
+        self.sb = self._sb_context.__enter__()
+
+    def _dismiss_popup(self):
+        try:
+            if self.sb.is_element_visible("#turboPromoClose"):
+                self.sb.click("#turboPromoClose")
+                log.debug("Dismissed turbo promo popup")
+        except Exception:
+            pass
+
+    def _save_cookies(self):
+        cookies = self.sb.get_cookies()
+        COOKIES_PATH.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+        log.info("Cookies saved to %s (%d cookies)", COOKIES_PATH, len(cookies))
+
+    def _load_cookies(self) -> bool:
+        if not COOKIES_PATH.exists():
+            log.info("No cookies file found")
+            return False
+
+        try:
+            cookies = json.loads(COOKIES_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Failed to read cookies: %s", e)
+            return False
+
+        self.sb.uc_open_with_reconnect(YGG_BASE_URL, reconnect_time=6)
+        for cookie in cookies:
+            cookie.pop("sameSite", None)
+            cookie.pop("httpOnly", None)
+            try:
+                self.sb.add_cookie(cookie)
+            except Exception as e:
+                log.debug("Skipping cookie %s: %s", cookie.get("name"), e)
+
+        log.info("Loaded %d cookies from file", len(cookies))
+        return True
+
+    def _is_logged_in(self) -> bool:
+        self.sb.uc_open_with_reconnect(YGG_BASE_URL, reconnect_time=6)
+        self.sb.sleep(2)
+        self._dismiss_popup()
+        page = self.sb.get_page_source()
+        return "Mon compte" in page
+
+    def login(self):
+        if self.logged_in:
+            return
+
+        self._start_browser()
+
+        if self._load_cookies() and self._is_logged_in():
+            self.logged_in = True
+            log.info("Session restored from cookies")
+            return
+
+        log.info("Cookies expired or missing, performing full login…")
+        login_url = f"{YGG_BASE_URL}/auth/login"
+        log.info("Opening %s", login_url)
+        self.sb.uc_open_with_reconnect(login_url, reconnect_time=6)
+        self._dismiss_popup()
+
+        log.info("Filling login form…")
+        self.sb.type('input[name="id"]', YGG_USERNAME)
+        self.sb.type('input[name="pass"]', YGG_PASSWORD)
+        self.sb.click('button[type="submit"]')
+
+        self.sb.sleep(3)
+        self._dismiss_popup()
+
+        if self._is_logged_in():
+            self.logged_in = True
+            self._save_cookies()
+            log.info("Login successful, cookies saved")
+        else:
+            log.error("Login failed — 'Mon compte' not found on page")
+
+    def search(self, query: str, category: int = None, sub_category: int = None) -> list[dict]:
+        with self._lock:
+            if not self.logged_in:
+                self.login()
+
+            search_query = query.replace(" ", "+")
+            base_url = f"{YGG_BASE_URL}/engine/search?name={search_query}&do=search"
+            if category:
+                base_url += f"&category={category}"
+            if sub_category:
+                base_url += f"&sub_category={sub_category}"
+
+            all_results = []
+            for page_num in range(MAX_SEARCH_PAGES):
+                page_url = base_url if page_num == 0 else f"{base_url}&page={page_num * 50}"
+                log.info("Searching page %d: %s", page_num + 1, page_url)
+                self.sb.uc_open_with_reconnect(page_url, reconnect_time=4)
+                self.sb.sleep(2)
+                self._dismiss_popup()
+
+                page_results = self._parse_results()
+                all_results.extend(page_results)
+
+                if len(page_results) < 50:
+                    break
+
+            log.info("Found %d total results across %d page(s)", len(all_results), page_num + 1)
+            return all_results
+
+    def _parse_results(self) -> list[dict]:
+        results = []
+        rows = self.sb.find_elements("table.table tbody tr")
+        for row in rows:
+            try:
+                cols = row.find_elements("css selector", "td")
+                if len(cols) < 9:
+                    continue
+
+                cat_div = cols[0].find_element("css selector", "div.hidden")
+                subcat = cat_div.get_attribute("textContent").strip()
+
+                name_el = cols[1].find_element("css selector", "a#torrent_name")
+                title = name_el.text.strip()
+                link = name_el.get_attribute("href")
+
+                match = re.search(r"/(\d+)-", link)
+                torrent_id = match.group(1) if match else ""
+
+                size = self._parse_size(cols[5].text.strip())
+                seeders = int(cols[7].text.strip())
+                leechers = int(cols[8].text.strip())
+
+                results.append({
+                    "title": title,
+                    "link": link,
+                    "torrent_id": torrent_id,
+                    "size": size,
+                    "seeders": seeders,
+                    "leechers": leechers,
+                    "subcat": subcat,
+                })
+            except Exception as e:
+                log.debug("Skipping row: %s", e)
+                continue
+        return results
+
+    def download(self, torrent_page_url: str) -> bytes | None:
+        with self._lock:
+            if not self.logged_in:
+                self.login()
+
+            log.info("Opening torrent page: %s", torrent_page_url)
+            self.sb.uc_open_with_reconnect(torrent_page_url, reconnect_time=4)
+            self.sb.sleep(2)
+            self._dismiss_popup()
+
+            # Clear any previous .torrent files
+            for f in glob.glob(os.path.join(self._download_dir, "*.torrent")):
+                os.remove(f)
+
+            self.sb.click('#download-timer-btn')
+            log.info("Waiting for download timer…")
+
+            self.sb.wait_for_element('#downloadTimerLink.ready', timeout=35)
+            self.sb.wait_for_element_not_visible('#downloadTimerLink[style*="display: none"]', timeout=5)
+            self.sb.sleep(1)
+
+            # Click the download link in the browser
+            self.sb.click('#downloadTimerLink')
+            log.info("Clicked download link, waiting for file…")
+
+            # Wait for the .torrent file to appear
+            torrent_file = None
+            for _ in range(15):
+                self.sb.sleep(1)
+                files = glob.glob(os.path.join(self._download_dir, "*.torrent"))
+                if files:
+                    torrent_file = files[0]
+                    break
+
+            if not torrent_file:
+                log.error("No .torrent file found in %s", self._download_dir)
+                return None, None
+
+            filename = os.path.basename(torrent_file)
+            data = Path(torrent_file).read_bytes()
+            os.remove(torrent_file)
+            log.info("Downloaded %s (%d bytes)", filename, len(data))
+            return data, filename
+
+    @staticmethod
+    def _parse_size(text: str) -> int:
+        text = text.upper().replace(",", ".").strip()
+        multipliers = {"KO": 1024, "KB": 1024, "MO": 1024**2, "MB": 1024**2,
+                       "GO": 1024**3, "GB": 1024**3, "TO": 1024**4, "TB": 1024**4}
+        for suffix, mult in multipliers.items():
+            if suffix in text:
+                try:
+                    return int(float(text.replace(suffix, "").strip()) * mult)
+                except ValueError:
+                    return 0
+        try:
+            return int(text)
+        except ValueError:
+            return 0
+
+    def close(self):
+        if self._sb_context:
+            try:
+                self._sb_context.__exit__(None, None, None)
+            except Exception:
+                pass
+            self.sb = None
+            self._sb_context = None
+            self.logged_in = False
+
+
+browser = YGGBrowser()
