@@ -2,3 +2,4 @@ seleniumbase
 fastapi
 uvicorn
 python-dotenv
+requests

@@ -12,6 +12,7 @@ from config import YGG_USERNAME, YGG_PASSWORD, YGG_BASE_URL, HEADLESS, MAX_SEARC
 log = logging.getLogger(__name__)
 
 COOKIES_PATH = Path(__file__).parent / "cookies.json"
+PASSKEY_PATH = Path(__file__).parent / "passkey.txt"
 DEBUG_DIR = Path(__file__).parent / "data"
 LOGIN_RETRIES = 3
 
@@ -26,6 +27,7 @@ class YGGBrowser:
             cls._instance.logged_in = False
             cls._instance._sb_context = None
             cls._instance._lock = threading.Lock()
+            cls._instance.passkey = None
         return cls._instance
 
     def _start_browser(self):
@@ -62,6 +64,35 @@ class YGGBrowser:
                 log.debug("Dismissed turbo promo popup")
         except Exception:
             pass
+
+    def _fetch_passkey(self):
+        log.info("Fetching passkey from account page…")
+        self._open_with_cf(f"{YGG_BASE_URL}/user/account", reconnect_time=6)
+        try:
+            el = self.sb.find_element("#profile_passkey")
+            pk = el.text.strip()
+            if pk:
+                self.passkey = pk
+                PASSKEY_PATH.write_text(pk, encoding="utf-8")
+                log.info("Passkey saved (%s…)", pk[:6])
+            else:
+                log.warning("Passkey element found but empty")
+        except Exception as e:
+            log.error("Failed to extract passkey: %s", e)
+            self._save_debug("passkey_fetch_fail")
+
+    def _load_passkey(self) -> bool:
+        if not PASSKEY_PATH.exists():
+            return False
+        try:
+            pk = PASSKEY_PATH.read_text(encoding="utf-8").strip()
+            if pk:
+                self.passkey = pk
+                log.info("Passkey loaded from file (%s…)", pk[:6])
+                return True
+        except OSError as e:
+            log.warning("Failed to read passkey file: %s", e)
+        return False
 
     def _save_cookies(self):
         cookies = self.sb.get_cookies()
@@ -114,6 +145,8 @@ class YGGBrowser:
         if self._load_cookies() and self._is_logged_in():
             self.logged_in = True
             log.info("Session restored from cookies")
+            if not self._load_passkey():
+                self._fetch_passkey()
             return
 
         log.info("Cookies expired or missing, performing full login…")
@@ -148,7 +181,8 @@ class YGGBrowser:
         if self._is_logged_in():
             self.logged_in = True
             self._save_cookies()
-            log.info("Login successful, cookies saved")
+            self._fetch_passkey()
+            log.info("Login successful, cookies and passkey saved")
         else:
             log.error("Login failed — 'Mon compte' not found on page")
 

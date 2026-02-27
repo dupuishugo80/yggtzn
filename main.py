@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.responses import PlainTextResponse
@@ -8,6 +9,10 @@ from config import API_KEY, DEBUG
 from browser import browser
 from resolver import resolve_query
 from torznab import caps_xml, search_xml, torznab_cats_to_ygg
+from torrent_cache import (
+    is_cache_available, get_from_cache, put_to_cache,
+    make_cache_key, inject_passkey, strip_passkey, filename_from_url,
+)
 
 logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -123,6 +128,44 @@ def download_torrent(
 
     if not url:
         return PlainTextResponse("Missing url", status_code=400)
+
+    url = quote(url, safe=':/?#[]@!$&\'()*+,;=-._~%')
+
+    try:
+        if browser.passkey and is_cache_available():
+            cache_key = make_cache_key(url)
+            cached = get_from_cache(cache_key)
+
+            if cached is not None:
+                cached_data, cached_filename = cached
+                log.info("Cache HIT for %s", url)
+                torrent_data = inject_passkey(cached_data, browser.passkey)
+                fname = cached_filename or filename_from_url(url)
+                return Response(
+                    content=torrent_data,
+                    media_type="application/x-bittorrent",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+                )
+
+            log.info("Cache MISS for %s", url)
+            torrent_data, filename = browser.download(url)
+            if not torrent_data:
+                return PlainTextResponse("Download failed", status_code=500)
+
+            try:
+                stripped = strip_passkey(torrent_data)
+                put_to_cache(cache_key, stripped, filename=filename)
+                log.info("Cached torrent for %s", url)
+            except Exception as e:
+                log.warning("Failed to cache torrent: %s", e)
+
+            return Response(
+                content=torrent_data,
+                media_type="application/x-bittorrent",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+    except Exception as e:
+        log.warning("Cache logic error, falling back to direct download: %s", e)
 
     torrent_data, filename = browser.download(url)
     if not torrent_data:
