@@ -4,12 +4,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.responses import PlainTextResponse
 
-from config import API_KEY
+from config import API_KEY, DEBUG
 from browser import browser
 from resolver import resolve_query
 from torznab import caps_xml, search_xml, torznab_cats_to_ygg
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
 DUMMY_RESULTS = [{
@@ -62,19 +62,24 @@ def torznab_api(
 
     if t in ("search", "tvsearch", "movie"):
         media = "tv" if t == "tvsearch" else "movie"
+        log.debug("Search request: t=%s, q=%r, imdbid=%r, tmdbid=%r, tvdbid=%r, cat=%r",
+                  t, q, imdbid, tmdbid, tvdbid, cat)
         search_q = resolve_query(
             q=q, imdbid=imdbid, tmdbid=tmdbid, tvdbid=tvdbid,
             media=media, season=season, ep=ep,
         )
 
         if not search_q:
+            log.debug("No search query resolved, returning DUMMY_RESULTS")
             download_base = str(request.base_url).rstrip("/")
             return Response(
                 content=search_xml(DUMMY_RESULTS, download_base=download_base, apikey=apikey),
                 media_type="application/xml",
             )
 
+        log.debug("Resolved search query: %r", search_q)
         ygg_cats = torznab_cats_to_ygg(cat)
+        log.debug("YGG categories: %s", ygg_cats)
 
         if ygg_cats:
             results = []
@@ -87,6 +92,7 @@ def torznab_api(
         else:
             results = browser.search(search_q)
 
+        log.debug("Search returned %d results", len(results))
         download_base = str(request.base_url).rstrip("/")
         return Response(
             content=search_xml(results, download_base=download_base, apikey=apikey),
