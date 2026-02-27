@@ -1,0 +1,17 @@
+services:
+  yggtzn:
+    build: .
+    container_name: yggtzn
+    restart: unless-stopped
+    ports:
+      - "9117:9117"
+    env_file:
+      - .env
+    environment:
+      - HEADLESS=false
+    volumes:
+      - yggtzn_data:/app/data
+    shm_size: "2gb"
+
+volumes:
+  yggtzn_data:
