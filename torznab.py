@@ -121,6 +121,11 @@ def search_xml(results: list[dict], download_base: str = "", apikey: str = "") -
 
         torznab_cat = ygg_subcat_to_torznab(r.get("subcat", ""))
 
+        parent_cat = (torznab_cat // 1000) * 1000
+        ET.SubElement(item, "category").text = str(parent_cat)
+        if torznab_cat != parent_cat:
+            ET.SubElement(item, "category").text = str(torznab_cat)
+
         def attr(name, value):
             el = ET.SubElement(item, f"{{{TORZNAB_NS}}}attr")
             el.set("name", name)

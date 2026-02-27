@@ -12,15 +12,26 @@ from torznab import caps_xml, search_xml, torznab_cats_to_ygg
 logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
-DUMMY_RESULTS = [{
-    "title": "YGGTorznab Test",
-    "link": "https://www.yggtorrent.org",
-    "torrent_id": "0",
-    "size": 0,
-    "seeders": 0,
-    "leechers": 0,
-    "subcat": "2183",
-}]
+DUMMY_RESULTS = [
+    {
+        "title": "YGGTorznab Test Movie",
+        "link": "https://www.yggtorrent.org",
+        "torrent_id": "0",
+        "size": 0,
+        "seeders": 0,
+        "leechers": 0,
+        "subcat": "2183",
+    },
+    {
+        "title": "YGGTorznab Test TV",
+        "link": "https://www.yggtorrent.org/tv",
+        "torrent_id": "0",
+        "size": 0,
+        "seeders": 0,
+        "leechers": 0,
+        "subcat": "2184",
+    },
+]
 
 
 @asynccontextmanager
@@ -70,7 +81,7 @@ def torznab_api(
         )
 
         if not search_q:
-            log.debug("No search query resolved, returning DUMMY_RESULTS")
+            log.debug("No search query resolved, returning dummy results")
             download_base = str(request.base_url).rstrip("/")
             return Response(
                 content=search_xml(DUMMY_RESULTS, download_base=download_base, apikey=apikey),
@@ -126,4 +137,4 @@ def download_torrent(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9117)
+    uvicorn.run(app, host="0.0.0.0", port=7474)
