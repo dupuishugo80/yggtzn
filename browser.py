@@ -148,12 +148,17 @@ class YGGBrowser:
 
         self._start_browser()
 
-        if self._load_cookies() and self._is_logged_in():
-            self.logged_in = True
-            log.info("Session restored from cookies")
-            if not self._load_passkey():
-                self._fetch_passkey()
-            return
+        if self._load_cookies():
+            if self._is_logged_in():
+                self.logged_in = True
+                log.info("Session restored from cookies")
+                if not self._load_passkey():
+                    self._fetch_passkey()
+                return
+            else:
+                log.warning("Cookies loaded but session invalid (no 'Mon compte') — deleting cookies")
+                COOKIES_PATH.unlink(missing_ok=True)
+                self.sb.delete_all_cookies()
 
         log.info("Cookies expired or missing, performing full login…")
         login_url = f"{YGG_BASE_URL}/auth/login"
@@ -211,10 +216,13 @@ class YGGBrowser:
                 self._open_with_cf(page_url, reconnect_time=6)
 
                 if page_num == 0:
-                    self._check_session()
+                    session_ok = self._check_session()
                     if not self.logged_in:
                         log.error("Could not restore session, aborting search")
                         return []
+                    if not session_ok:
+                        log.info("Re-navigating to search page after re-login")
+                        self._open_with_cf(page_url, reconnect_time=6)
 
                 page_results = self._parse_results()
                 all_results.extend(page_results)
@@ -225,13 +233,16 @@ class YGGBrowser:
             log.info("Found %d total results across %d page(s)", len(all_results), page_num + 1)
             return all_results
 
-    def _check_session(self):
+    def _check_session(self) -> bool:
+        """Return True if session was valid, False if re-login was needed."""
         page = self.sb.get_page_source()
         if "Mon compte" not in page:
             log.warning("Session expired — re-logging in")
             self._save_debug("session_expired")
             self.logged_in = False
             self.login()
+            return False
+        return True
 
     def _parse_results(self) -> list[dict]:
         results = []
