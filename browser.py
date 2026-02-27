@@ -52,6 +52,12 @@ class YGGBrowser:
             pass
 
     def _open_with_cf(self, url, reconnect_time=10):
+        if url.rstrip("/") != YGG_BASE_URL.rstrip("/"):
+            log.debug("Navigating to homepage first for CF clearance")
+            self.sb.uc_open_with_reconnect(YGG_BASE_URL, reconnect_time=reconnect_time)
+            self.sb.sleep(2)
+            self._handle_cf()
+
         self.sb.uc_open_with_reconnect(url, reconnect_time=reconnect_time)
         self.sb.sleep(2)
         self._handle_cf()
@@ -204,6 +210,12 @@ class YGGBrowser:
                 log.info("Searching page %d: %s", page_num + 1, page_url)
                 self._open_with_cf(page_url, reconnect_time=6)
 
+                if page_num == 0:
+                    self._check_session()
+                    if not self.logged_in:
+                        log.error("Could not restore session, aborting search")
+                        return []
+
                 page_results = self._parse_results()
                 all_results.extend(page_results)
 
@@ -213,9 +225,20 @@ class YGGBrowser:
             log.info("Found %d total results across %d page(s)", len(all_results), page_num + 1)
             return all_results
 
+    def _check_session(self):
+        page = self.sb.get_page_source()
+        if "Mon compte" not in page:
+            log.warning("Session expired — re-logging in")
+            self._save_debug("session_expired")
+            self.logged_in = False
+            self.login()
+
     def _parse_results(self) -> list[dict]:
         results = []
         rows = self.sb.find_elements("table.table tbody tr")
+        if not rows:
+            log.warning("No table rows found on search page — URL: %s", self.sb.get_current_url())
+            self._save_debug("no_results")
         for row in rows:
             try:
                 cols = row.find_elements("css selector", "td")

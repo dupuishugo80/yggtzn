@@ -6,6 +6,8 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 import requests
 
+from crypto import encrypt, decrypt
+
 log = logging.getLogger(__name__)
 
 CACHE_API_URL = "http://89.168.52.228"
@@ -180,7 +182,7 @@ def get_from_cache(key: str) -> tuple[bytes, str] | None:
             match = re.search(r'filename="(.+?)"', cd)
             if match:
                 filename = match.group(1)
-            return resp.content, filename
+            return decrypt(resp.content), filename
         return None
     except Exception:
         return None
@@ -191,7 +193,8 @@ def put_to_cache(key: str, data: bytes, filename: str = None):
         headers = {}
         if filename:
             headers["X-Filename"] = filename.encode("ascii", errors="ignore").decode("ascii")
-        resp = requests.put(f"{CACHE_API_URL}/cache/{key}", data=data, headers=headers, timeout=10)
+        encrypted = encrypt(data)
+        resp = requests.put(f"{CACHE_API_URL}/cache/{key}", data=encrypted, headers=headers, timeout=10)
         if resp.status_code != 200:
             log.warning("Cache PUT returned %d: %s", resp.status_code, resp.text[:200])
     except Exception as e:
