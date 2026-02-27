@@ -12,6 +12,8 @@ from config import YGG_USERNAME, YGG_PASSWORD, YGG_BASE_URL, HEADLESS, MAX_SEARC
 log = logging.getLogger(__name__)
 
 COOKIES_PATH = Path(__file__).parent / "cookies.json"
+DEBUG_DIR = Path(__file__).parent / "data"
+LOGIN_RETRIES = 3
 
 
 class YGGBrowser:
@@ -32,8 +34,26 @@ class YGGBrowser:
         self._download_dir = get_downloads_folder()
         os.makedirs(self._download_dir, exist_ok=True)
         log.info("Starting SeleniumBase UC browser (downloads → %s)…", self._download_dir)
-        self._sb_context = SB(uc=True, headed=not HEADLESS, headless2=HEADLESS)
+        self._sb_context = SB(
+            uc=True,
+            headed=not HEADLESS,
+            headless2=HEADLESS,
+            chromium_arg="--no-sandbox,--disable-dev-shm-usage,--disable-gpu",
+        )
         self.sb = self._sb_context.__enter__()
+
+    def _handle_cf(self):
+        try:
+            self.sb.uc_gui_handle_cf()
+            self.sb.sleep(2)
+        except BaseException:
+            pass
+
+    def _open_with_cf(self, url, reconnect_time=10):
+        self.sb.uc_open_with_reconnect(url, reconnect_time=reconnect_time)
+        self.sb.sleep(2)
+        self._handle_cf()
+        self._dismiss_popup()
 
     def _dismiss_popup(self):
         try:
@@ -59,7 +79,7 @@ class YGGBrowser:
             log.warning("Failed to read cookies: %s", e)
             return False
 
-        self.sb.uc_open_with_reconnect(YGG_BASE_URL, reconnect_time=6)
+        self._open_with_cf(YGG_BASE_URL)
         for cookie in cookies:
             cookie.pop("sameSite", None)
             cookie.pop("httpOnly", None)
@@ -72,11 +92,18 @@ class YGGBrowser:
         return True
 
     def _is_logged_in(self) -> bool:
-        self.sb.uc_open_with_reconnect(YGG_BASE_URL, reconnect_time=6)
-        self.sb.sleep(2)
-        self._dismiss_popup()
+        self._open_with_cf(YGG_BASE_URL)
         page = self.sb.get_page_source()
         return "Mon compte" in page
+
+    def _save_debug(self, name):
+        try:
+            os.makedirs(DEBUG_DIR, exist_ok=True)
+            self.sb.save_screenshot(str(DEBUG_DIR / f"{name}.png"))
+            src = self.sb.get_page_source()[:1000]
+            log.warning("Debug [%s] URL=%s page_source=%.500s", name, self.sb.get_current_url(), src)
+        except Exception as e:
+            log.warning("Could not save debug info: %s", e)
 
     def login(self):
         if self.logged_in:
@@ -91,9 +118,24 @@ class YGGBrowser:
 
         log.info("Cookies expired or missing, performing full login…")
         login_url = f"{YGG_BASE_URL}/auth/login"
-        log.info("Opening %s", login_url)
-        self.sb.uc_open_with_reconnect(login_url, reconnect_time=6)
-        self._dismiss_popup()
+
+        for attempt in range(1, LOGIN_RETRIES + 1):
+            log.info("Login attempt %d/%d — Opening %s", attempt, LOGIN_RETRIES, login_url)
+            self._open_with_cf(login_url)
+
+            if self.sb.is_element_visible('input[name="id"]'):
+                break
+
+            log.warning("Login form not found (attempt %d/%d)", attempt, LOGIN_RETRIES)
+            self._save_debug(f"login_attempt_{attempt}")
+
+            if attempt < LOGIN_RETRIES:
+                self.sb.sleep(5)
+
+        if not self.sb.is_element_visible('input[name="id"]'):
+            log.error("Login form not found after %d attempts, giving up", LOGIN_RETRIES)
+            self._save_debug("login_final_fail")
+            return
 
         log.info("Filling login form…")
         self.sb.type('input[name="id"]', YGG_USERNAME)
@@ -126,9 +168,7 @@ class YGGBrowser:
             for page_num in range(MAX_SEARCH_PAGES):
                 page_url = base_url if page_num == 0 else f"{base_url}&page={page_num * 50}"
                 log.info("Searching page %d: %s", page_num + 1, page_url)
-                self.sb.uc_open_with_reconnect(page_url, reconnect_time=4)
-                self.sb.sleep(2)
-                self._dismiss_popup()
+                self._open_with_cf(page_url, reconnect_time=6)
 
                 page_results = self._parse_results()
                 all_results.extend(page_results)
@@ -182,11 +222,8 @@ class YGGBrowser:
                 self.login()
 
             log.info("Opening torrent page: %s", torrent_page_url)
-            self.sb.uc_open_with_reconnect(torrent_page_url, reconnect_time=4)
-            self.sb.sleep(2)
-            self._dismiss_popup()
+            self._open_with_cf(torrent_page_url, reconnect_time=6)
 
-            # Clear any previous .torrent files
             for f in glob.glob(os.path.join(self._download_dir, "*.torrent")):
                 os.remove(f)
 
@@ -197,11 +234,9 @@ class YGGBrowser:
             self.sb.wait_for_element_not_visible('#downloadTimerLink[style*="display: none"]', timeout=5)
             self.sb.sleep(1)
 
-            # Click the download link in the browser
             self.sb.click('#downloadTimerLink')
             log.info("Clicked download link, waiting for file…")
 
-            # Wait for the .torrent file to appear
             torrent_file = None
             for _ in range(15):
                 self.sb.sleep(1)

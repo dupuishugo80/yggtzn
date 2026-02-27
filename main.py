@@ -26,7 +26,10 @@ DUMMY_RESULTS = [{
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Logging in to YGG…")
-    browser.login()
+    try:
+        browser.login()
+    except Exception as e:
+        log.error("Initial login failed: %s — will retry on first request", e)
     yield
     log.info("Shutting down browser…")
     browser.close()
